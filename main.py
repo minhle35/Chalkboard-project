@@ -7,8 +7,8 @@ import json
 from six.moves.urllib.request import urlopen
 from jose import jwt
 from authlib.integrations.flask_client import OAuth
-
-import secrets
+import re
+# import secrets
 
 app = Flask(__name__)
 app.secret_key = 'SECRET_KEY'
@@ -119,29 +119,29 @@ def verify_jwt(request):
                                 "No RSA key in JWKS"}, 401)
 
 
-@app.route('/')
-def index():
-    return "Please navigate to /lodgings to use this API"\
+# @app.route('/')
+# def index():
+#     return "Please navigate to /lodgings to use this API"\
 
 # Create a lodging if the Authorization header contains a valid JWT
-@app.route('/lodgings', methods=['POST'])
-def lodgings_post():
-    if request.method == 'POST':
-        payload = verify_jwt(request)
-        content = request.get_json()
-        new_lodging = datastore.entity.Entity(key=client.key(LODGINGS))
-        new_lodging.update({"name": content["name"], "description": content["description"],
-          "price": content["price"]})
-        client.put(new_lodging)
-        return jsonify(id=new_lodging.key.id)
-    else:
-        return jsonify(error='Method not recogonized')
+# @app.route('/lodgings', methods=['POST'])
+# def lodgings_post():
+#     if request.method == 'POST':
+#         payload = verify_jwt(request)
+#         content = request.get_json()
+#         new_lodging = datastore.entity.Entity(key=client.key(LODGINGS))
+#         new_lodging.update({"name": content["name"], "description": content["description"],
+#           "price": content["price"]})
+#         client.put(new_lodging)
+#         return jsonify(id=new_lodging.key.id)
+#     else:
+#         return jsonify(error='Method not recogonized')
 
 # Decode the JWT supplied in the Authorization header
-@app.route('/decode', methods=['GET'])
-def decode_jwt():
-    payload = verify_jwt(request)
-    return payload
+# @app.route('/decode', methods=['GET'])
+# def decode_jwt():
+#     payload = verify_jwt(request)
+#     return payload
 
 
 # Generate a JWT from the Auth0 domain and return it
@@ -175,8 +175,7 @@ def login_user():
     except requests.exceptions.HTTPError as http_error:
         if response.status_code == 403:
             return jsonify({"error": "Username and/or password is incorrect"}), 401
-        else:
-            return jsonify({"error": "Authentication failed", "details": str(http_error)}), 500
+        return jsonify({"error": "Authentication failed", "details": str(http_error)}), 500
     except Exception as e:
         return jsonify({"error": "Authentication failed", "details": str(e)}), 500
 
@@ -185,6 +184,46 @@ def login_user():
     if not id_token:
         return jsonify({"error": "Authentication failed", "details": "id_token not found"}), 500
     return jsonify({"token": id_token}), 200
+
+@app.route('/users', methods=['GET'])
+def get_all_users():
+    try:
+        # Verify the JWT
+        payload = verify_jwt(request)
+
+        # Extract the subject (sub) from the JWT payload
+        user_sub = payload["sub"]
+
+        # Query the Datastore for the user's role
+        query = client.query(kind="users")
+        query.add_filter(filter=("sub", "=", user_sub))
+        all_users = list(query.fetch())
+        if not all_users:
+            return jsonify({"error": "User not found"}), 401
+
+        pattern = r"<Entity\('users', (\d+)\) \{.*'sub': '([^']+)', 'role': '([^']+)'\}>"
+        response_data = []
+        has_admin = False
+        for user in all_users:
+            match = re.search(pattern, str(user))
+            if match:
+                user_id = match.group(1)
+                sub = match.group(2)
+                role = match.group(3)
+                response_data.append({"id": user_id, "role": role, "sub": sub})
+                if role == "admin":
+                    has_admin = True
+
+        if not has_admin:
+            return jsonify({"error": "Forbidden: Admin access required"}), 403
+
+        return jsonify(response_data), 200
+
+    except AuthError as e:
+        return handle_auth_error(e)
+    except Exception as e:
+        return jsonify({"error": "Internal server error", "detail": str(e)}), 500
+
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=8080, debug=True)
 
