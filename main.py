@@ -9,6 +9,7 @@ from jose import jwt
 from authlib.integrations.flask_client import OAuth
 import re
 import os
+from collections import deque
 # import secrets
 
 def generate_signed_url(bucket_name, blob_name, expiration_minutes=15):
@@ -81,24 +82,16 @@ def verify_jwt(request, user_id=None):
         auth_header = request.headers['Authorization'].split()
         token = auth_header[1]
     else:
-        raise AuthError({"code": "no auth header",
-                            "description":
-                                "Authorization header is missing"}, 401)
+        raise AuthError({"code": "no auth header"}, 401)
 
     jsonurl = urlopen("https://"+ DOMAIN+"/.well-known/jwks.json")
     jwks = json.loads(jsonurl.read())
     try:
         unverified_header = jwt.get_unverified_header(token)
     except jwt.JWTError:
-        raise AuthError({"code": "invalid_header",
-                        "description":
-                            "Invalid header. "
-                            "Use an RS256 signed JWT Access Token"}, 401)
+        raise AuthError({"Error": "Unauthorized"}, 401)
     if unverified_header["alg"] == "HS256":
-        raise AuthError({"code": "invalid_header",
-                        "description":
-                            "Invalid header. "
-                            "Use an RS256 signed JWT Access Token"}, 401)
+        raise AuthError({"Error": "Unauthorized"}, 401)
     rsa_key = {}
     for key in jwks["keys"]:
         if key["kid"] == unverified_header["kid"]:
@@ -125,8 +118,7 @@ def verify_jwt(request, user_id=None):
             results_user_id = list(query.fetch())[0].id
             if user_id:
                 if str(results_user_id) != str(user_id):
-                    raise AuthError({"code": "Mis-matched JWT token with user_id",
-                                "description": "Token does not belong to the user."}, 403)
+                    raise AuthError({"Error": "You don't have permission on this resource"}, 403)
         except jwt.ExpiredSignatureError:
             raise AuthError({"code": "token_expired",
                             "description": "token is expired"}, 401)
@@ -138,11 +130,7 @@ def verify_jwt(request, user_id=None):
         except AuthError:
             raise
         except Exception:
-            raise AuthError({"code": "invalid_header",
-                            "description":
-                                "Unable to parse authentication"
-                                " token."}, 401)
-
+            raise AuthError({"Error": "Unauthorized"}, 401)
         return payload
     else:
         raise AuthError({"code": "no_rsa_key",
@@ -160,11 +148,8 @@ def login_user():
         content = request.get_json()
         username = content["username"]
         password = content["password"]
-    except Exception:
-        return jsonify({"error": "Request body is invalid"}), 400
-    if not username or not password:
-        return jsonify({"error": "Request body is invalid"}), 400
-
+    except KeyError:
+        return jsonify({"Error": "The request body is invalid"}), 400
 
     body = {'grant_type':'password',
             'username':username,
@@ -180,7 +165,7 @@ def login_user():
 
     except requests.exceptions.HTTPError as http_error:
         if response.status_code == 403:
-            return jsonify({"error": "Username and/or password is incorrect"}), 401
+            return jsonify({"Error": "Unauthorized"}), 401
         return jsonify({"error": "Authentication failed", "details": str(http_error)}), 500
     except Exception as e:
         return jsonify({"error": "Authentication failed", "details": str(e)}), 500
@@ -234,7 +219,7 @@ def get_all_users():
         # Verify the JWT
         payload = verify_jwt(request)
         if not payload["nickname"].startswith("admin"):
-            return jsonify({"error": "Forbidden: Admin access required"}), 403
+            return jsonify({"Error": "You don't have permission on this resource"}), 403
 
         # Query the Datastore for the user's role
         query = client.query(kind="users")
@@ -280,7 +265,7 @@ def get_user(user_id):
             courses = []
             # query = client.query(kind="courses")
             if avatar_url:
-
+                avatar_url = f"http://127.0.0.1:8080/users/{user_id}/avatar"
                 return jsonify({"avatar_url": avatar_url, "courses": courses, "id": user_id, "role": role, "sub": sub}), 200
             return jsonify({"courses": [], "id": user_id, "role": role, "sub": sub}), 200
         if role == "admin":
@@ -330,14 +315,14 @@ def update_avatar(user_id):
             return jsonify({"error": "No Users found"}), 404
         user_entity['avatar_url'] = avatar_url
         client.put(user_entity)
-        avatar_url = f"http://localhost:8080/users/{user_id}/avatar"
+        avatar_url = f"http://127.0.0.1:8080/users/{user_id}/avatar"
 
         return jsonify({"avatar_url": avatar_url}), 200
 
     except AuthError as e:
         return handle_auth_error(e)
     except KeyError as e:
-        return jsonify({"error": "The request does not include the key “file”", "detail": str(e)}), 400
+        return jsonify({"Error": "The request body is invalid"}), 400
 
 @app.route('/users/<user_id>/avatar', methods=['GET'])
 def get_avatar(user_id):
@@ -351,7 +336,7 @@ def get_avatar(user_id):
 
         avatar_url = user_entity.get('avatar_url')
         if not avatar_url:
-            return jsonify({"error": "No avatar available for this user."}), 404
+            return jsonify({"Error": "Not found"}), 404
 
         # In case we want to return a signed URL
         # signed_url = generate_signed_url(BUCKET_NAME, avatar_url)
@@ -386,7 +371,7 @@ def delete_avatar(user_id):
 
         avatar_url = user_entity.get('avatar_url')
         if not avatar_url:
-            return jsonify({"error": "No avatar available for this user."}), 404
+            return jsonify({"Error": "Not found"}), 404
 
         # Delete the avatar file from Cloud Storage
         bucket = storage_client.bucket(BUCKET_NAME)
@@ -409,14 +394,14 @@ def create_course():
         payload = verify_jwt(request)
         print("Payload:", payload)
         if not payload.get("nickname").startswith("admin"):
-            return jsonify({"error": "Forbidden: Admin access required"}), 403
+            return jsonify({"Error": "You don't have permission on this resource"}), 403
 
         # Parse the JSON request body
         data = request.get_json()
         required_fields = ["subject", "number", "title", "term", "instructor_id"]
         missing_fields = [field for field in required_fields if field not in data]
         if missing_fields:
-            return jsonify({"error": f"Missing fields: {', '.join(missing_fields)}"}), 400
+            return jsonify({"Error": "The request body is invalid"}), 400
 
         # Validate instructor_id exists and is an instructor
         instructor_id = data["instructor_id"]
@@ -424,7 +409,7 @@ def create_course():
         instructor_entity = client.get(instructor_key)
 
         if not instructor_entity or instructor_entity.get("role") != "instructor":
-            return jsonify({"error": "Invalid instructor_id"}), 400
+            return jsonify({"Error": "The request body is invalid"}), 400
 
         # Create a new course entity
         course_key = client.key("courses")
@@ -448,14 +433,87 @@ def create_course():
             "number": data["number"],
             "title": data["title"],
             "term": data["term"],
-            "instructor_id": instructor_id,
-            "self": f"http://localhost:8080/courses/{course_id}"
+            "instructor_id": str(instructor_id),
+            "self": f"http://127.0.0.1:8080/courses/{course_id}"
         }
 
         return jsonify(response_data), 201
 
     except AuthError as e:
         return handle_auth_error(e)
+    except Exception as e:
+        return jsonify({"error": "Internal server error", "detail": str(e)}), 500
+
+@app.route('/courses/<course_id>', methods=['GET'])
+def get_course(course_id):
+
+    # Get the course entity from Datastore
+    course_key = client.key("courses", int(course_id))
+    course_entity = client.get(course_key)
+
+    if not course_entity:
+        return jsonify({"error": "Course not found"}), 404
+
+    # Build the response
+    response_data = {
+        "id": course_id,
+        "subject": course_entity["subject"],
+        "number": course_entity["number"],
+        "title": course_entity["title"],
+        "term": course_entity["term"],
+        "instructor_id": course_entity["instructor_id"],
+        "self": f"http://127.0.0.1:8080/courses/{course_id}"
+    }
+
+    return jsonify(response_data), 200
+
+@app.route('/courses', methods=['GET'])
+def get_all_courses():
+    try:
+        # Extract query parameters
+        offset = int(request.args.get('offset', 0))
+        limit = int(request.args.get('limit', 3))
+
+        print("Offset:", offset, "Limit:", limit)
+
+        # Get all course entities from Datastore
+        query = client.query(kind="courses")
+        query.order = ["subject"]
+        query_iter = query.fetch()
+
+        # Create the response list of course dictionary
+        courses = deque()
+        lenght = 0
+        for course in query_iter:
+            print("Adding Course:\n", course)
+            courses.append({
+                "id": course.key.id,
+                "instructor_id": course["instructor_id"],
+                "number": course["number"],
+                "self": f"http://127.0.0.1:8080/courses/{course.key.id}",
+                "subject": course["subject"],
+                "term": course["term"],
+                "title": course["title"],
+            })
+            lenght += 1
+            # Ensure the deque contains at most 'limit' smallest items
+            if len(courses) > limit:
+                courses.pop()  # Remove the largest subject alphabetically
+
+        total_courses = query_iter.num_results
+        next_url = None
+        if offset + limit < total_courses:
+            next_url = f"http://127.0.0.1:8080/courses?limit={limit}&offset={offset + limit}"
+
+
+        # Build the response
+        response = {
+            "courses": list(courses)
+        }
+        if next_url:
+            response["next"] = next_url
+
+        return jsonify(response), 200
     except Exception as e:
         return jsonify({"error": "Internal server error", "detail": str(e)}), 500
 
