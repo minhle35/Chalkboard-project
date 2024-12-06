@@ -1,6 +1,6 @@
-from flask import Flask, request, jsonify
-from google.cloud import datastore
-
+from flask import Flask, request, jsonify, Response
+from google.cloud import datastore, storage
+import datetime
 import requests
 import json
 
@@ -8,12 +8,30 @@ from six.moves.urllib.request import urlopen
 from jose import jwt
 from authlib.integrations.flask_client import OAuth
 import re
+import os
 # import secrets
+
+def generate_signed_url(bucket_name, blob_name, expiration_minutes=15):
+    """Generate a signed URL for accessing a private object in Cloud Storage."""
+    storage_client = storage.Client()
+
+    # Get the bucket and blob
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+
+    # Set the expiration time for the signed URL
+    expiration = datetime.timedelta(minutes=expiration_minutes)
+
+    # Generate the signed URL
+    signed_url = blob.generate_signed_url(expiration=expiration, method="GET")
+
+    return signed_url
 
 app = Flask(__name__)
 app.secret_key = 'SECRET_KEY'
 
 client = datastore.Client()
+storage_client = storage.Client()
 
 LODGINGS = "lodgings"
 
@@ -26,6 +44,8 @@ DOMAIN = 'dev-4ega266k2nbz02by.us.auth0.com'
 # Note: don't include the protocol in the value of the variable DOMAIN
 
 ALGORITHMS = ["RS256"]
+
+BUCKET_NAME = "final-user-avatar"
 
 oauth = OAuth(app)
 
@@ -56,7 +76,7 @@ def handle_auth_error(ex):
     return response
 
 # Verify the JWT in the request's Authorization header
-def verify_jwt(request):
+def verify_jwt(request, user_id=None):
     if 'Authorization' in request.headers:
         auth_header = request.headers['Authorization'].split()
         token = auth_header[1]
@@ -98,6 +118,15 @@ def verify_jwt(request):
                 audience=CLIENT_ID,
                 issuer="https://"+ DOMAIN+"/"
             )
+            # extract 'sub' from token payload
+            token_sub = payload.get('sub')
+            query = client.query(kind="users")
+            query.add_filter("sub", "=", token_sub)
+            results_user_id = list(query.fetch())[0].id
+            if user_id:
+                if str(results_user_id) != str(user_id):
+                    raise AuthError({"code": "Mis-matched JWT token with user_id",
+                                "description": "Token does not belong to the user."}, 403)
         except jwt.ExpiredSignatureError:
             raise AuthError({"code": "token_expired",
                             "description": "token is expired"}, 401)
@@ -106,6 +135,8 @@ def verify_jwt(request):
                             "description":
                                 "incorrect claims,"
                                 " please check the audience and issuer"}, 401)
+        except AuthError:
+            raise
         except Exception:
             raise AuthError({"code": "invalid_header",
                             "description":
@@ -117,31 +148,6 @@ def verify_jwt(request):
         raise AuthError({"code": "no_rsa_key",
                             "description":
                                 "No RSA key in JWKS"}, 401)
-
-
-# @app.route('/')
-# def index():
-#     return "Please navigate to /lodgings to use this API"\
-
-# Create a lodging if the Authorization header contains a valid JWT
-# @app.route('/lodgings', methods=['POST'])
-# def lodgings_post():
-#     if request.method == 'POST':
-#         payload = verify_jwt(request)
-#         content = request.get_json()
-#         new_lodging = datastore.entity.Entity(key=client.key(LODGINGS))
-#         new_lodging.update({"name": content["name"], "description": content["description"],
-#           "price": content["price"]})
-#         client.put(new_lodging)
-#         return jsonify(id=new_lodging.key.id)
-#     else:
-#         return jsonify(error='Method not recogonized')
-
-# Decode the JWT supplied in the Authorization header
-# @app.route('/decode', methods=['GET'])
-# def decode_jwt():
-#     payload = verify_jwt(request)
-#     return payload
 
 
 # Generate a JWT from the Auth0 domain and return it
@@ -185,39 +191,268 @@ def login_user():
         return jsonify({"error": "Authentication failed", "details": "id_token not found"}), 500
     return jsonify({"token": id_token}), 200
 
+def user_match(user_info_list, user_id_target=None):
+    """
+    Matches users from a list of Datastore entities based on user_id_target.
+
+    Args:
+        user_info_list: List of user entities from Datastore.
+        user_id_target: The ID of the user to search for (optional).
+
+    Returns:
+        has_admin (bool): Whether an admin exists in the list.
+        response_list (list): All user info if user_id_target is not provided.
+        target_user_info (dict or None): Target user's info if user_id_target is provided.
+    """
+
+    pattern = r"<Entity\('users', (\d+)\) \{.*'sub': '([^']+)', 'role': '([^']+)'\}>"
+    response_data = []
+
+    for user in user_info_list:
+        match = re.search(pattern, str(user))
+        if match:
+            user_id = match.group(1)
+            sub = match.group(2)
+            role = match.group(3)
+            response_data.append({"id": user_id, "role": role, "sub": sub})
+
+    if user_id_target:
+        # Filter response_data for the target user ID
+        target_user_info = next((u for u in response_data if u["id"] == user_id_target), None)
+        return None, target_user_info
+
+    return response_data, None
+
+
 @app.route('/users', methods=['GET'])
 def get_all_users():
+    """_summary_: function to retrieve ALL users from the users kind
+    in Google Cloud Datastore. The response is filtered by the sub
+    field from the authenticated user's JWT.
+    """
     try:
         # Verify the JWT
         payload = verify_jwt(request)
-
-        # Extract the subject (sub) from the JWT payload
-        user_sub = payload["sub"]
+        if not payload["nickname"].startswith("admin"):
+            return jsonify({"error": "Forbidden: Admin access required"}), 403
 
         # Query the Datastore for the user's role
         query = client.query(kind="users")
-        query.add_filter(filter=("sub", "=", user_sub))
         all_users = list(query.fetch())
         if not all_users:
-            return jsonify({"error": "User not found"}), 401
+            return jsonify({"error": "No users found"}), 401
+        user_info_list, _ = user_match(all_users)
 
-        pattern = r"<Entity\('users', (\d+)\) \{.*'sub': '([^']+)', 'role': '([^']+)'\}>"
-        response_data = []
-        has_admin = False
-        for user in all_users:
-            match = re.search(pattern, str(user))
-            if match:
-                user_id = match.group(1)
-                sub = match.group(2)
-                role = match.group(3)
-                response_data.append({"id": user_id, "role": role, "sub": sub})
-                if role == "admin":
-                    has_admin = True
+        return jsonify(user_info_list), 200
 
-        if not has_admin:
+    except AuthError as e:
+        return handle_auth_error(e)
+    except Exception as e:
+        return jsonify({"error": "Internal server error", "detail": str(e)}), 500
+
+
+@app.route('/users/<user_id>', methods=['GET'])
+def get_user(user_id):
+    """_summary_: function to retrieve a specific user from the users kind
+
+    Args:
+        user_id (_type_): _description_
+
+    Returns:
+        _type_: _description_
+    """
+    try:
+        key = client.key("users", int(user_id))
+        user_entity = client.get(key)
+        if not user_entity:
+            return jsonify({"error": "No Users found"}), 401
+
+        # Extract details from the dictionary-like entity
+        user_id = str(user_entity.key.id)
+        sub = user_entity.get('sub', None)
+        role = user_entity.get('role', None)
+        avatar_url = user_entity.get('avatar_url', None)
+
+        # Log extracted details
+        print("Result:", user_id, sub, role, avatar_url)
+
+        if role in ("instructor","student"):
+            courses = []
+            # query = client.query(kind="courses")
+            if avatar_url:
+
+                return jsonify({"avatar_url": avatar_url, "courses": courses, "id": user_id, "role": role, "sub": sub}), 200
+            return jsonify({"courses": [], "id": user_id, "role": role, "sub": sub}), 200
+        if role == "admin":
+            if avatar_url:
+
+                return jsonify({"avatar_url": avatar_url, "courses": [], "id": user_id, "role": role, "sub": sub}), 200
+
+            return jsonify({"courses": [], "id": user_id, "role": role, "sub": sub}), 200
+
+    except AuthError as e:
+        return handle_auth_error(e)
+    except Exception as e:
+        return jsonify({"error": "Internal server error", "detail": str(e)}), 500
+
+def upload_to_bucket(bucket_name, file, user_id):
+    """Uploads the file to Cloud Storage and returns the public URL."""
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(f"{user_id}.png")
+
+    # Upload file
+    blob.upload_from_file(file, content_type="image/png")
+
+    # Return the public URL
+    return blob.name
+
+@app.route('/users/<user_id>/avatar', methods=['POST'])
+def update_avatar(user_id):
+    print("Request header", request.headers)
+    try:
+        payload = verify_jwt(request, user_id=user_id)
+
+        file = request.files['file']
+        if file.filename == '' or 'file' not in request.files:
+            return jsonify({"error": "Missing 'file' key in request"}, 400)
+
+        file = request.files['file']
+        if not file.filename.endswith(".png"):
+            return jsonify({"error": "Bad Request: File must have a .png extension"}), 400
+
+        # upload file to google cloud storage
+        avatar_url = upload_to_bucket(BUCKET_NAME, file, user_id)
+
+        # update avatar_url in datastore
+        key = client.key("users", int(user_id))
+        user_entity = client.get(key)
+        if not user_entity:
+            return jsonify({"error": "No Users found"}), 404
+        user_entity['avatar_url'] = avatar_url
+        client.put(user_entity)
+        avatar_url = f"http://localhost:8080/users/{user_id}/avatar"
+
+        return jsonify({"avatar_url": avatar_url}), 200
+
+    except AuthError as e:
+        return handle_auth_error(e)
+    except KeyError as e:
+        return jsonify({"error": "The request does not include the key “file”", "detail": str(e)}), 400
+
+@app.route('/users/<user_id>/avatar', methods=['GET'])
+def get_avatar(user_id):
+    try:
+        payload = verify_jwt(request, user_id=user_id)
+
+        key = client.key("users", int(user_id))
+        user_entity = client.get(key)
+        if not user_entity:
+            return jsonify({"error": "No Users found"}), 404
+
+        avatar_url = user_entity.get('avatar_url')
+        if not avatar_url:
+            return jsonify({"error": "No avatar available for this user."}), 404
+
+        # In case we want to return a signed URL
+        # signed_url = generate_signed_url(BUCKET_NAME, avatar_url)
+        # return jsonify({"avatar_url": signed_url}), 200
+
+        # Initialize Cloud Storage client
+        bucket = storage_client.bucket(BUCKET_NAME)
+        blob = bucket.blob(avatar_url)
+
+        # Check if the blob exists
+        if not blob.exists():
+            return jsonify({"error": "Avatar file not found"}), 404
+
+        # Download the file as bytes
+        image_data = blob.download_as_bytes()
+
+        # Return the image data directly with appropriate headers
+        return Response(image_data, mimetype="image/png")
+
+    except AuthError as e:
+        return handle_auth_error(e)
+
+@app.route('/users/<user_id>/avatar', methods=['DELETE'])
+def delete_avatar(user_id):
+    try:
+        payload = verify_jwt(request, user_id=user_id)
+
+        key = client.key("users", int(user_id))
+        user_entity = client.get(key)
+        if not user_entity:
+            return jsonify({"error": "No Users found"}), 404
+
+        avatar_url = user_entity.get('avatar_url')
+        if not avatar_url:
+            return jsonify({"error": "No avatar available for this user."}), 404
+
+        # Delete the avatar file from Cloud Storage
+        bucket = storage_client.bucket(BUCKET_NAME)
+        blob = bucket.blob(avatar_url)
+
+        blob.delete()
+
+        #update avatar_url in datastore
+        user_entity['avatar_url'] = ''
+        client.put(user_entity)
+
+        return jsonify({"message": "Avatar deleted successfully"}), 204
+    except AuthError as e:
+        return handle_auth_error(e)
+
+@app.route('/courses', methods=['POST'])
+def create_course():
+    try:
+        # Verify JWT
+        payload = verify_jwt(request)
+        print("Payload:", payload)
+        if not payload.get("nickname").startswith("admin"):
             return jsonify({"error": "Forbidden: Admin access required"}), 403
 
-        return jsonify(response_data), 200
+        # Parse the JSON request body
+        data = request.get_json()
+        required_fields = ["subject", "number", "title", "term", "instructor_id"]
+        missing_fields = [field for field in required_fields if field not in data]
+        if missing_fields:
+            return jsonify({"error": f"Missing fields: {', '.join(missing_fields)}"}), 400
+
+        # Validate instructor_id exists and is an instructor
+        instructor_id = data["instructor_id"]
+        instructor_key = client.key("users", int(instructor_id))
+        instructor_entity = client.get(instructor_key)
+
+        if not instructor_entity or instructor_entity.get("role") != "instructor":
+            return jsonify({"error": "Invalid instructor_id"}), 400
+
+        # Create a new course entity
+        course_key = client.key("courses")
+        course_entity = datastore.Entity(key=course_key)
+        course_entity.update({
+            "subject": data["subject"],
+            "number": data["number"],
+            "title": data["title"],
+            "term": data["term"],
+            "instructor_id": instructor_id
+        })
+
+        # Save to Datastore
+        client.put(course_entity)
+
+        # Build the response
+        course_id = course_entity.key.id
+        response_data = {
+            "id": course_id,
+            "subject": data["subject"],
+            "number": data["number"],
+            "title": data["title"],
+            "term": data["term"],
+            "instructor_id": instructor_id,
+            "self": f"http://localhost:8080/courses/{course_id}"
+        }
+
+        return jsonify(response_data), 201
 
     except AuthError as e:
         return handle_auth_error(e)
