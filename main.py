@@ -247,10 +247,11 @@ def get_user(user_id):
         _type_: _description_
     """
     try:
+        payload = verify_jwt(request, user_id=user_id)
         key = client.key("users", int(user_id))
         user_entity = client.get(key)
         if not user_entity:
-            return jsonify({"error": "No Users found"}), 401
+            return jsonify({"Error": "Not found"}), 401
 
         # Extract details from the dictionary-like entity
         user_id = str(user_entity.key.id)
@@ -452,7 +453,7 @@ def get_course(course_id):
     course_entity = client.get(course_key)
 
     if not course_entity:
-        return jsonify({"error": "Course not found"}), 404
+        return jsonify({"Error": "Not found"}), 404
 
     # Build the response
     response_data = {
@@ -461,7 +462,7 @@ def get_course(course_id):
         "number": course_entity["number"],
         "title": course_entity["title"],
         "term": course_entity["term"],
-        "instructor_id": course_entity["instructor_id"],
+        "instructor_id": str(course_entity["instructor_id"]),
         "self": f"http://127.0.0.1:8080/courses/{course_id}"
     }
 
