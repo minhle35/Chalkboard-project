@@ -10,7 +10,7 @@ from authlib.integrations.flask_client import OAuth
 import re
 import os
 from collections import deque
-# import secrets
+from dotenv import load_dotenv
 
 def generate_signed_url(bucket_name, blob_name, expiration_minutes=15):
     """Generate a signed URL for accessing a private object in Cloud Storage."""
@@ -27,9 +27,10 @@ def generate_signed_url(bucket_name, blob_name, expiration_minutes=15):
     signed_url = blob.generate_signed_url(expiration=expiration, method="GET")
 
     return signed_url
+load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = 'SECRET_KEY'
+app.secret_key = os.getenv("SECRET_KEY")
 
 client = datastore.Client()
 storage_client = storage.Client()
@@ -37,16 +38,14 @@ storage_client = storage.Client()
 LODGINGS = "lodgings"
 
 # Update the values of the following 3 variables
-CLIENT_ID = 't9InHvvDdPZ6XyKuDYFaQ1fmKWsZlBV0'
-CLIENT_SECRET = 'mWf2sW5YoWUcfT6UqFx1nWuuqNuMXR81-pfYQ0fzPtRO_B_PdPaVXM-tJ4cqeinS'
-DOMAIN = 'dev-4ega266k2nbz02by.us.auth0.com'
-# For example
-# DOMAIN = '493-24-spring.us.auth0.com'
-# Note: don't include the protocol in the value of the variable DOMAIN
-
+CLIENT_ID = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+DOMAIN = os.getenv("DOMAIN")
+BUCKET_NAME = os.getenv("BUCKET_NAME")
 ALGORITHMS = ["RS256"]
-
-BUCKET_NAME = "final-user-avatar"
+APP_HOST = os.getenv("APP_HOST")
+APP_PORT = os.getenv("APP_PORT")
+APP_URL = os.getenv("APP_URL")
 
 oauth = OAuth(app)
 
@@ -259,19 +258,14 @@ def get_user(user_id):
         role = user_entity.get('role', None)
         avatar_url = user_entity.get('avatar_url', None)
 
-        # Log extracted details
-        print("Result:", user_id, sub, role, avatar_url)
-
         if role in ("instructor","student"):
             courses = []
-            # query = client.query(kind="courses")
             if avatar_url:
-                avatar_url = f"http://127.0.0.1:8080/users/{user_id}/avatar"
+                avatar_url = f"http://{APP_HOST}:{APP_PORT}/users/{user_id}/avatar"
                 return jsonify({"avatar_url": avatar_url, "courses": courses, "id": user_id, "role": role, "sub": sub}), 200
             return jsonify({"courses": [], "id": user_id, "role": role, "sub": sub}), 200
         if role == "admin":
             if avatar_url:
-
                 return jsonify({"avatar_url": avatar_url, "courses": [], "id": user_id, "role": role, "sub": sub}), 200
 
             return jsonify({"courses": [], "id": user_id, "role": role, "sub": sub}), 200
@@ -296,7 +290,7 @@ def upload_to_bucket(bucket_name, file, user_id):
 def update_avatar(user_id):
     print("Request header", request.headers)
     try:
-        payload = verify_jwt(request, user_id=user_id)
+        _ = verify_jwt(request, user_id=user_id)
 
         file = request.files['file']
         if file.filename == '' or 'file' not in request.files:
@@ -316,19 +310,27 @@ def update_avatar(user_id):
             return jsonify({"error": "No Users found"}), 404
         user_entity['avatar_url'] = avatar_url
         client.put(user_entity)
-        avatar_url = f"http://127.0.0.1:8080/users/{user_id}/avatar"
+        avatar_url = f"http://{APP_HOST}:{APP_PORT}/users/{user_id}/avatar"
 
         return jsonify({"avatar_url": avatar_url}), 200
 
     except AuthError as e:
         return handle_auth_error(e)
-    except KeyError as e:
+    except KeyError as _:
         return jsonify({"Error": "The request body is invalid"}), 400
 
 @app.route('/users/<user_id>/avatar', methods=['GET'])
 def get_avatar(user_id):
+    """_summary_: function to retrieve an avatar from the users kind
+
+    Args:
+        user_id (str):
+
+    Returns:
+        result as json if error, otherwise download image and return with error code
+    """
     try:
-        payload = verify_jwt(request, user_id=user_id)
+        _ = verify_jwt(request, user_id=user_id)
 
         key = client.key("users", int(user_id))
         user_entity = client.get(key)
@@ -354,7 +356,7 @@ def get_avatar(user_id):
         # Download the file as bytes
         image_data = blob.download_as_bytes()
 
-        # Return the image data directly with appropriate headers
+        # Return the image data directly with mime type headers
         return Response(image_data, mimetype="image/png")
 
     except AuthError as e:
@@ -362,8 +364,16 @@ def get_avatar(user_id):
 
 @app.route('/users/<user_id>/avatar', methods=['DELETE'])
 def delete_avatar(user_id):
+    """_summary_: function to delete an avatar from the users kind
+
+    Args:
+        user_id (str): _description_
+
+    Returns:
+        error message
+    """
     try:
-        payload = verify_jwt(request, user_id=user_id)
+        _ = verify_jwt(request, user_id=user_id)
 
         key = client.key("users", int(user_id))
         user_entity = client.get(key)
@@ -435,7 +445,7 @@ def create_course():
             "title": data["title"],
             "term": data["term"],
             "instructor_id": str(instructor_id),
-            "self": f"http://127.0.0.1:8080/courses/{course_id}"
+            "self": f"{APP_URL}/courses/{course_id}"
         }
 
         return jsonify(response_data), 201
@@ -463,7 +473,7 @@ def get_course(course_id):
         "title": course_entity["title"],
         "term": course_entity["term"],
         "instructor_id": str(course_entity["instructor_id"]),
-        "self": f"http://127.0.0.1:8080/courses/{course_id}"
+        "self": f"{APP_URL}/courses/{course_id}"
     }
 
     return jsonify(response_data), 200
@@ -475,49 +485,46 @@ def get_all_courses():
         offset = int(request.args.get('offset', 0))
         limit = int(request.args.get('limit', 3))
 
-        print("Offset:", offset, "Limit:", limit)
-
-        # Get all course entities from Datastore
+        # Create a query for the "courses" kind, sorted by "subject"
         query = client.query(kind="courses")
         query.order = ["subject"]
-        query_iter = query.fetch()
 
-        # Create the response list of course dictionary
-        courses = deque()
-        lenght = 0
-        for course in query_iter:
-            print("Adding Course:\n", course)
-            courses.append({
+
+        results_iter = query.fetch()
+        all_courses = list(results_iter)
+
+        # Apply offset and limit
+        courses = all_courses[offset:offset + limit]
+
+        # Convert courses into dictionaries
+        courses_dict = [
+            {
                 "id": course.key.id,
                 "instructor_id": course["instructor_id"],
                 "number": course["number"],
-                "self": f"http://127.0.0.1:8080/courses/{course.key.id}",
+                "self": f"{APP_URL}/courses/{course.key.id}",
                 "subject": course["subject"],
                 "term": course["term"],
                 "title": course["title"],
-            })
-            lenght += 1
-            # Ensure the deque contains at most 'limit' smallest items
-            if len(courses) > limit:
-                courses.pop()  # Remove the largest subject alphabetically
-
-        total_courses = query_iter.num_results
-        next_url = None
-        if offset + limit < total_courses:
-            next_url = f"http://127.0.0.1:8080/courses?limit={limit}&offset={offset + limit}"
-
+            }
+            for course in courses
+        ]
 
         # Build the response
+        total_courses = len(all_courses)
         response = {
-            "courses": list(courses)
+            "courses": courses_dict,
         }
-        if next_url:
-            response["next"] = next_url
+
+        # Add "next" URL if there are more results
+        if offset + limit < total_courses:
+            response["next"] = f"{APP_URL}/courses?limit={limit}&offset={offset + limit}"
 
         return jsonify(response), 200
+
     except Exception as e:
         return jsonify({"error": "Internal server error", "detail": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=8080, debug=True)
+    app.run(host=APP_HOST, port=APP_PORT, debug=True)
 
