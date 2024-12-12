@@ -1,0 +1,70 @@
+# Python bytecode files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+.env/
+.env.*
+
+# Logs
+*.log
+*.out
+*.err
+
+# Cache files
+*.cache
+*.pyc
+.cache/
+*.pyo
+
+# Flask debug files
+instance/
+*.sqlite3
+
+# Google Cloud credentials and service account keys
+# *.json
+
+# Docker
+Dockerfile
+*.dockerignore
+docker-compose.yml
+.docker/
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# IDE configurations
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Compiled files
+*.so
+
+# Test outputs
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+*.cover
+coverage.xml
+.cache
+
+# Static assets (optional, depending on the project)
+static/
+media/
+
+# Cloud-specific
+*.gcloudignore
