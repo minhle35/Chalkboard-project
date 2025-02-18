@@ -1,4 +1,4 @@
-# Project Overview
+# Chalkboard Project Overview
 
 This Flask application provides a robust backend for handling user authentication, course management, and avatar updates using Google Cloud Datastore and Storage. It features JWT-based authentication, integrating with Auth0 for secure user verification, and supports CRUD operations on user and course entities.
 
